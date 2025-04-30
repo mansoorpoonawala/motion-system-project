@@ -3,202 +3,119 @@ use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.NUMERIC_STD.ALL;
 
 entity oled_driver is
-  generic (
-    SYS_CLK    : integer := 100_000_000;  -- 100 MHz system clock
-    SPI_CLK    : integer :=   1_000_000   -- 1 MHz SPI clock
+  generic(
+    SYS_CLK : integer := 100_000_000;
+    SPI_CLK : integer :=   1_000_000
   );
-  port (
-    clk         : in  std_logic;
-    rst         : in  std_logic;                             -- active-high reset
-    axis_x      : in  std_logic_vector(15 downto 0);
-    axis_y      : in  std_logic_vector(15 downto 0);
-    axis_z      : in  std_logic_vector(15 downto 0);
-    spi_mosi    : out std_logic;
-    spi_sclk    : out std_logic;
-    spi_cs_n    : out std_logic;
-    spi_dc      : out std_logic;                             -- '0'=command, '1'=data
-    oled_rst_n  : out std_logic                              -- reset for OLED
+  port(
+    clk        : in  std_logic;
+    rst        : in  std_logic;
+    axis_x     : in  std_logic_vector(15 downto 0);
+    axis_y     : in  std_logic_vector(15 downto 0);
+    axis_z     : in  std_logic_vector(15 downto 0);
+    spi_mosi   : out std_logic;
+    spi_sclk   : out std_logic;
+    spi_cs_n   : out std_logic;
+    spi_dc     : out std_logic;
+    oled_rst_n : out std_logic
   );
-end entity oled_driver;
+end entity;
 
 architecture rtl of oled_driver is
+  constant DIV : integer := SYS_CLK/(SPI_CLK*2);
+  signal cnt     : integer range 0 to DIV := 0;
+  signal sclk_i  : std_logic := '0';
+  signal shiftb  : std_logic_vector(7 downto 0);
+  signal bitn    : integer range 0 to 7 := 7;
+  signal start_b : std_logic := '0';
+  type st2 is (RST_P, INIT, IDLE, SEND, WAIT, DONE);
+  signal st      : st2 := RST_P;
+  constant CMDS  : std_logic_vector(7 downto 0)  array (0 to 3) :=
+    (x"AE",x"A1",x"C8",x"AF");  -- OFF, remap, scandec, ON
+  signal ci      : integer range 0 to 3 := 0;
+  constant NBY   : integer := 12;
+  type data_t is array(0 to NBY-1) of std_logic_vector(7 downto 0);
+  signal dbuf    : data_t := (others=>(others=>'0'));
+  signal di      : integer range 0 to NBY := 0;
 
-  -- ===================================================================
-  -- Clock divider to generate SPI clock from SYS_CLK
-  -- ===================================================================
-  constant DIVIDER    : integer := SYS_CLK / (SPI_CLK * 2);
-  signal clk_div_cnt  : integer range 0 to DIVIDER := 0;
-  signal spi_clk_int  : std_logic := '0';
-
-  -- ===================================================================
-  -- SPI shift engine
-  -- ===================================================================
-  signal shift_reg    : std_logic_vector(7 downto 0) := (others => '0');
-  signal bit_cnt      : integer range 0 to 7 := 7;
-  signal spi_start    : std_logic := '0';
-
-  -- ===================================================================
-  -- FSM for initialization & data updates
-  -- ===================================================================
-  type state_t is (RESET_PULSE, INIT_CMDS, IDLE, SEND_BYTE, WAIT_SPI, DONE);
-  signal state        : state_t := RESET_PULSE;
-  signal cmd_index    : integer := 0;
-  constant N_INIT     : integer := 4;
-  type cmd_array_t is array(0 to N_INIT-1) of std_logic_vector(7 downto 0);
-  -- Minimal init sequence (SSD1351, adjust for your OLED):
-  constant INIT_CMDS : cmd_array_t := (
-    x"AE",  -- DISPLAYOFF
-    x"A1",  -- SETREMAP
-    x"C8",  -- COMSCANDEC
-    x"AF"   -- DISPLAYON
-  );
-
-  -- ===================================================================
-  -- Data queue: you should fill this dynamically each update
-  -- Here we show 12 hex nibbles: 4 for X, 4 for Y, 4 for Z
-  -- ===================================================================
-  constant N_DATA_BYTES : integer := 12;
-  type data_array_t is array(0 to N_DATA_BYTES-1) of std_logic_vector(7 downto 0);
-  signal data_queue   : data_array_t := (others => (others => '0'));
-  signal data_index   : integer range 0 to N_DATA_BYTES := 0;
-
-  -- Hex-to-ASCII converter
-  function hex2asc(nib : std_logic_vector(3 downto 0)) return std_logic_vector is
-    variable u : integer := to_integer(unsigned(nib));
-    variable out : std_logic_vector(7 downto 0);
+  function h2a(nib: std_logic_vector(3 downto 0)) return std_logic_vector is
+    variable u: integer := to_integer(unsigned(nib));
   begin
-    if u < 10 then
-      out := std_logic_vector(to_unsigned(48 + u, 8));  -- '0'..'9'
-    else
-      out := std_logic_vector(to_unsigned(55 + u, 8));  -- 'A'..'F'
+    if u<10 then return std_logic_vector(to_unsigned(48+u, 8));
+    else         return std_logic_vector(to_unsigned(55+u, 8));
     end if;
-    return out;
-  end function hex2asc;
+  end function;
 
 begin
 
-  -- Generate SPI clock
-  process(clk, rst)
+  -- SPI CLK divider
+  process(clk,rst)
   begin
-    if rst = '1' then
-      clk_div_cnt <= 0;
-      spi_clk_int <= '0';
+    if rst='1' then cnt<=0; sclk_i<='0';
     elsif rising_edge(clk) then
-      if clk_div_cnt = DIVIDER-1 then
-        clk_div_cnt <= 0;
-        spi_clk_int <= not spi_clk_int;
-      else
-        clk_div_cnt <= clk_div_cnt + 1;
-      end if;
+      if cnt=DIV-1 then cnt<=0; sclk_i<=not sclk_i;
+      else cnt<=cnt+1; end if;
     end if;
   end process;
-  spi_sclk <= spi_clk_int;
-
-  -- Always select the OLED
-  spi_cs_n <= '0';
+  spi_sclk<=sclk_i;
+  spi_cs_n<='0';
 
   -- Main FSM
-  process(clk, rst)
+  process(clk,rst)
   begin
-    if rst = '1' then
-      state       <= RESET_PULSE;
-      oled_rst_n  <= '0';
-      cmd_index   <= 0;
-      spi_start   <= '0';
-      data_index  <= 0;
+    if rst='1' then
+      st<=RST_P; oled_rst_n<='0';
+      ci<=0; di<=0; start_b<='0'; bitn<=7;
     elsif rising_edge(clk) then
-      case state is
+      case st is
+        when RST_P =>
+          oled_rst_n<='0';
+          if cnt=0 then oled_rst_n<='1'; st<=INIT; end if;
 
-        -- Hold OLED in reset for a few µs
-        when RESET_PULSE =>
-          oled_rst_n <= '0';
-          if clk_div_cnt = 0 then
-            oled_rst_n <= '1';
-            state      <= INIT_CMDS;
-          end if;
+        when INIT =>
+          if ci<4 then
+            shiftb<=CMDS(ci); spi_dc<='0'; start_b<='1';
+            st<=SEND;
+          else st<=IDLE; end if;
 
-        -- Send initialization commands
-        when INIT_CMDS =>
-          if cmd_index < N_INIT then
-            shift_reg <= INIT_CMDS(cmd_index);
-            spi_dc    <= '0';       -- command mode
-            spi_start <= '1';
-            state     <= SEND_BYTE;
-          else
-            state <= IDLE;
-          end if;
-
-        -- Idle: prepare the next data queue
         when IDLE =>
-          -- Build data_queue with ASCII hex of axis_x,y,z
-          data_queue(0)  <= hex2asc(axis_x(15 downto 12));
-          data_queue(1)  <= hex2asc(axis_x(11 downto  8));
-          data_queue(2)  <= hex2asc(axis_x( 7 downto  4));
-          data_queue(3)  <= hex2asc(axis_x( 3 downto  0));
-          data_queue(4)  <= hex2asc(axis_y(15 downto 12));
-          data_queue(5)  <= hex2asc(axis_y(11 downto  8));
-          data_queue(6)  <= hex2asc(axis_y( 7 downto  4));
-          data_queue(7)  <= hex2asc(axis_y( 3 downto  0));
-          data_queue(8)  <= hex2asc(axis_z(15 downto 12));
-          data_queue(9)  <= hex2asc(axis_z(11 downto  8));
-          data_queue(10) <= hex2asc(axis_z( 7 downto  4));
-          data_queue(11) <= hex2asc(axis_z( 3 downto  0));
-          data_index     <= 0;
-          state          <= SEND_BYTE;
+          dbuf(0)<=h2a(axis_x(15 downto 12));
+          dbuf(1)<=h2a(axis_x(11 downto  8));
+          dbuf(2)<=h2a(axis_x( 7 downto  4));
+          dbuf(3)<=h2a(axis_x( 3 downto  0));
+          dbuf(4)<=h2a(axis_y(15 downto 12));
+          dbuf(5)<=h2a(axis_y(11 downto  8));
+          dbuf(6)<=h2a(axis_y( 7 downto  4));
+          dbuf(7)<=h2a(axis_y( 3 downto  0));
+          dbuf(8)<=h2a(axis_z(15 downto 12));
+          dbuf(9)<=h2a(axis_z(11 downto  8));
+          dbuf(10)<=h2a(axis_z( 7 downto  4));
+          dbuf(11)<=h2a(axis_z( 3 downto  0));
+          di<=0; start_b<='1'; spi_dc<='1'; shiftb<=dbuf(0);
+          st<=SEND;
 
-        -- Send either a command or data byte
-        when SEND_BYTE =>
-          if cmd_index < N_INIT then
-            -- still in init sequence?
-            -- (we should really track init vs data separately)
-            null;
-          else
-            shift_reg <= data_queue(data_index);
-            spi_dc    <= '1';       -- data mode
+        when SEND =>
+          if start_b='1' then
+            start_b<='0'; bitn<=7;
+          elsif rising_edge(sclk_i) then
+            spi_mosi<=shiftb(bitn);
+            if bitn=0 then st<=WAIT; else bitn<=bitn-1; end if;
           end if;
-          spi_start <= '1';
-          state     <= WAIT_SPI;
 
-        -- Wait for SPI byte to finish shifting out
-        when WAIT_SPI =>
-          if spi_clk_int = '1' then  -- just after MSB shifts
-            if bit_cnt = 0 then
-              spi_start <= '0';
-              bit_cnt   <= 7;
-              if cmd_index < N_INIT then
-                cmd_index <= cmd_index + 1;
-                state     <= INIT_CMDS;
-              else
-                if data_index < N_DATA_BYTES-1 then
-                  data_index <= data_index + 1;
-                  state      <= SEND_BYTE;
-                else
-                  state <= DONE;
-                end if;
-              end if;
+        when WAIT =>
+          if st='WAIT' and sclk_i='1' then
+            if ci<4 then ci<=ci+1; st<=INIT;
             else
-              bit_cnt <= bit_cnt - 1;
+              if di<NBY-1 then di<=di+1;
+                shiftb<=dbuf(di+1); start_b<='1'; st<=SEND;
+              else st<=DONE; end if;
             end if;
           end if;
 
         when DONE =>
-          -- Loop back and update display continuously
-          state <= IDLE;
-
+          st<=IDLE;
       end case;
     end if;
   end process;
 
-  -- SPI shift register output
-  process(spi_clk_int, spi_start)
-  begin
-    if spi_start = '1' then
-      if rising_edge(spi_clk_int) then
-        spi_mosi <= shift_reg(bit_cnt);
-      end if;
-    else
-      spi_mosi <= '0';
-    end if;
-  end process;
-
-end architecture rtl;
+end architecture;
