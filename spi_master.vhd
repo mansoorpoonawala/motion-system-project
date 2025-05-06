@@ -1,3 +1,9 @@
+-- Created by Gemini
+-- Based on Verilog code by David J. Marion
+-- Adapted for ADXL345 based on datasheet
+-- Date: May 6, 2025
+-- For Zybo Z7 Accelerometer Reading
+
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all; -- Required for unsigned types and arithmetic
@@ -115,7 +121,7 @@ begin
         elsif falling_edge(sclk_reg_int) then -- Change MOSI on falling edge (CPHA=1)
              mosi_reg <= spi_tx_byte(7 - to_integer(spi_bit_counter));
         end if;
-        -- Removed the problematic 'else' clause here.
+        -- The problematic 'else' clause was here and has been removed.
     end process;
 
     -- State Machine Process
