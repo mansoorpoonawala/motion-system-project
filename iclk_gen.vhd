@@ -1,8 +1,3 @@
--- Created by Gemini
--- Based on Verilog code by David J. Marion
--- Date: May 6, 2025
--- For Zybo Z7 Accelerometer Reading
-
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all; -- Required for unsigned types and arithmetic
