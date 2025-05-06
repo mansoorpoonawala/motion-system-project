@@ -2,7 +2,7 @@ library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.NUMERIC_STD.ALL;
 
-entity spi_master_adxl345 is
+entity spi_master is
     Port (
         iclk        : in  std_logic;                     -- Input clock (4MHz)
         reset       : in  std_logic;                     -- Synchronous reset, active high
@@ -13,9 +13,9 @@ entity spi_master_adxl345 is
         acl_data    : out std_logic_vector(47 downto 0); -- Concatenated X, Y, Z data
         spi_busy    : out std_logic                      -- SPI busy signal
     );
-end spi_master_adxl345;
+end spi_master;
 
-architecture Behavioral of spi_master_adxl345 is
+architecture Behavioral of spi_master is
     -- Constants for ADXL345 registers and commands
     constant POWER_CTL_ADDR  : std_logic_vector(7 downto 0) := x"2D"; -- POWER_CTL register address
     constant POWER_CTL_DATA  : std_logic_vector(7 downto 0) := x"08"; -- Enable measurement mode
