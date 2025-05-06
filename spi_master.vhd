@@ -1,8 +1,4 @@
--- Created by Gemini
--- Based on Verilog code by David J. Marion
--- Adapted for ADXL345 based on datasheet
--- Date: May 6, 2025
--- For Zybo Z7 Accelerometer Reading
+
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -216,18 +212,19 @@ begin
                 when RECEIVE_DATA_BYTES =>
                     spi_busy_reg <= '1'; -- SPI is busy
                     -- Receive 6 data bytes (X LSB, X MSB, Y LSB, Y MSB, Z LSB, Z MSB)
-                    if spi_bit_counter = to_unsigned(7, 3) and rising_edge(sclk_reg_int) then -- After 8 bits are shifted out (Corrected comparison)
-                        -- Store the received byte based on byte counter
-                        case spi_byte_counter is
-                            when 1 => X_data(7 downto 0) <= spi_rx_byte; -- X LSB
-                            when 2 => X_data(15 downto 8) <= spi_rx_byte; -- X MSB
-                            when 3 => Y_data(7 downto 0) <= spi_rx_byte; -- Y LSB
-                            when 4 => Y_data(15 downto 8) <= spi_rx_byte; -- Y MSB
-                            when 5 => Z_data(7 downto 0) <= spi_rx_byte; -- Z LSB
-                            when 6 => Z_data(15 downto 8) <= spi_rx_byte; -- Z MSB
-                            when others => null; -- Should not happen
-                        end case;
+                    -- Corrected comparisons in 'when' clauses using to_unsigned
+                    case spi_byte_counter is
+                        when to_unsigned(1, 3) => X_data(7 downto 0) <= spi_rx_byte; -- X LSB
+                        when to_unsigned(2, 3) => X_data(15 downto 8) <= spi_rx_byte; -- X MSB
+                        when to_unsigned(3, 3) => Y_data(7 downto 0) <= spi_rx_byte; -- Y LSB
+                        when to_unsigned(4, 3) => Y_data(15 downto 8) <= spi_rx_byte; -- Y MSB
+                        when to_unsigned(5, 3) => Z_data(7 downto 0) <= spi_rx_byte; -- Z LSB
+                        when to_unsigned(6, 3) => Z_data(15 downto 8) <= spi_rx_byte; -- Z MSB
+                        when others => null; -- Should not happen
+                    end case;
 
+
+                    if spi_bit_counter = to_unsigned(7, 3) and rising_edge(sclk_reg_int) then -- After 8 bits are shifted out (Corrected comparison)
                         if spi_byte_counter = to_unsigned(6, 3) then -- After receiving the last data byte (Corrected comparison)
                             state_reg <= END_READ_DATA;
                         else
