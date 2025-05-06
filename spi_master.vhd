@@ -104,25 +104,28 @@ begin
 
     -- SPI Communication Process (Handles SCLK, MOSI, MISO shifting)
     -- Implements SPI Mode 1 (CPOL=1, CPHA=1)
-    process (sclk_reg_int, reset)
-    begin
-        if reset = '1' then
-            mosi_reg <= '0';
-            spi_tx_byte <= (others => '0');
-            spi_rx_byte <= (others => '0');
-            spi_bit_counter <= (others => '0');
-        elsif rising_edge(sclk_reg_int) then -- Sample MISO on rising edge (CPHA=1)
-            spi_rx_byte(7 - to_integer(spi_bit_counter)) <= miso;
-            if spi_bit_counter = to_unsigned(7, 3) then -- Correct comparison with unsigned literal
-                spi_bit_counter <= (others => '0');
-            else
-                spi_bit_counter <= spi_bit_counter + 1;
-            end if;
-        elsif falling_edge(sclk_reg_int) then -- Change MOSI on falling edge (CPHA=1)
-             mosi_reg <= spi_tx_byte(7 - to_integer(spi_bit_counter));
-        end if;
-        -- The problematic 'else' clause was here and has been removed.
-    end process;
+    -- SPI shift register process (handles both edges of sclk_reg_int)
+process (sclk_reg_int, reset)
+begin
+  if reset = '1' then
+    spi_bit_counter <= (others => '0');
+    spi_rx_byte     <= (others => '0');
+    mosi_reg        <= '0';
+  elsif sclk_reg_int'event then                -- any edge of SCLK
+    if sclk_reg_int = '1' then                  -- rising edge
+      -- sample MISO
+      spi_rx_byte(7 - to_integer(spi_bit_counter)) <= miso;
+      if spi_bit_counter = to_unsigned(7,3) then
+        spi_bit_counter <= (others => '0');
+      else
+        spi_bit_counter <= spi_bit_counter + 1;
+      end if;
+    else                                         -- falling edge
+      -- drive MOSI
+      mosi_reg <= spi_tx_byte(7 - to_integer(spi_bit_counter));
+    end if;
+  end if;
+end process;
 
     -- State Machine Process
     process (iclk, reset)
