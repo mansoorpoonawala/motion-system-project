@@ -1,267 +1,282 @@
 -- Created by Gemini
--- Based on Verilog code by David J. Marion
--- Adapted for ADXL345 based on datasheet
+-- Based on user's code and previous adaptations for ADXL345
 -- Date: May 6, 2025
 -- For Zybo Z7 Accelerometer Reading
 
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all; -- Required for unsigned types and arithmetic
--- use ieee.std_logic_unsigned.all; -- Alternative for arithmetic with std_logic_vector (if preferred) - numeric_std is generally preferred
 
-entity spi_master is
-    port (
-        iclk       : in  std_logic; -- 4MHz clock input
-        reset      : in  std_logic; -- Synchronous reset input
-        miso       : in  std_logic; -- SPI Master In Slave Out
-        sclk       : out std_logic; -- SPI Serial Clock (1MHz generated internally)
-        mosi       : out std_logic; -- SPI Master Out Slave In
-        cs         : out std_logic; -- SPI Chip Select (active low)
-        acl_data   : out std_logic_vector(47 downto 0); -- Output accelerometer data (X[15:0], Y[15:0], Z[15:0])
-        spi_busy   : out std_logic -- Indicates if SPI is busy
-    );
-end entity spi_master;
+entity spi_master_adxl345 is
+  port (
+    iclk      : in  std_logic;  -- 4 MHz system clock
+    reset     : in  std_logic;  -- synchronous, active-high
+    miso      : in  std_logic;  -- from ADXL345
+    sclk      : out std_logic;  -- to ADXL345, 1 MHz, CPOL=1
+    mosi      : out std_logic;  -- to ADXL345
+    cs        : out std_logic;  -- active-low chip-select
+    acl_data  : out std_logic_vector(47 downto 0); -- {X[15:0], Y, Z}
+    spi_busy  : out std_logic   -- high whenever CS='0'
+  );
+end spi_master_adxl345;
 
-architecture behavioral of spi_master is
+architecture rtl of spi_master_adxl345 is
 
-    -- Internal signal for the generated 1MHz SCLK
-    signal sclk_control : std_logic := '0';
-    -- Corrected 1MHz SCLK generation from 4MHz iclk (divide by 4)
-    signal sclk_div_counter : unsigned(1 downto 0) := (others => '0');
-    signal sclk_reg_int : std_logic := '0';
+  -- delay counts for ≈11.1 ms (44400@4 MHz) and ≈10 ms (40000@4 MHz)
+  -- Using unsigned constants for consistency with unsigned counters
+  constant POWERUP_DELAY_CYCLES : unsigned(31 downto 0) := to_unsigned(44400, 32);
+  constant DATA_READY_DELAY_CYCLES : unsigned(31 downto 0) := to_unsigned(40000, 32);
 
-    -- Constants for ADXL345 commands and register addresses
-    -- First byte format: R/W (1 bit), MB (1 bit), Address (6 bits)
-    constant ADXL345_WRITE : std_logic := '0';
-    constant ADXL345_READ  : std_logic := '1';
-    constant ADXL345_SINGLE_BYTE : std_logic := '0';
-    constant ADXL345_MULTI_BYTE  : std_logic := '1';
+  -- SPI sequence states
+  type state_t is (
+    POWERUP_DELAY,
+    WRITE_POWER_CTL_CMD,
+    WRITE_POWER_CTL_DATA,
+    WAIT_WRITE_COMPLETE,
+    POST_WRITE_DELAY,
+    READ_DATA_CMD,
+    READ_DATA_BYTES,
+    WAIT_READ_COMPLETE,
+    POST_READ_DELAY
+  );
+  signal state  : state_t := POWERUP_DELAY;
 
-    constant POWER_CTL_ADDR : std_logic_vector(5 downto 0) := "101101"; -- 0x2D
-    constant DATAX0_ADDR    : std_logic_vector(5 downto 0) := "110010"; -- 0x32
+  -- Counters (using unsigned types)
+  signal delay_cnt   : unsigned(31 downto 0) := (others => '0');
+  signal bit_cnt     : unsigned(2 downto 0) := (others => '0'); -- 3 bits for 0 to 7
+  signal byte_cnt    : unsigned(2 downto 0) := (others => '0'); -- 3 bits for 0 to 6
 
-    -- Data byte to write to POWER_CTL to enable measurement mode (Measure bit D3 = 1)
-    -- Assuming other bits are 0 for simplicity. Refer to datasheet for other POWER_CTL bits.
-    constant POWER_CTL_MEASURE_EN : std_logic_vector(7 downto 0) := x"08";
+  -- Corrected 1MHz SCLK generation (divide by 4)
+  signal sclk_div_counter : unsigned(1 downto 0) := (others => '0'); -- 2 bits for 0 to 3
+  signal sclk_reg    : std_logic := '1'; -- CPOL=1, starts high
+  signal sclk_prev   : std_logic := '1';
 
-    -- Internal registers to hold received data (16 bits per axis for ADXL345)
-    signal X_data : std_logic_vector(15 downto 0) := (others => '0');
-    signal Y_data : std_logic_vector(15 downto 0) := (others => '0');
-    signal Z_data : std_logic_vector(15 downto 0) := (others => '0');
+  -- TX/RX shift registers
+  signal tx_shift    : std_logic_vector(7 downto 0) := (others => '0');
+  signal rx_shift    : std_logic_vector(7 downto 0) := (others => '0');
 
-    -- State machine sync counter (running at 4MHz)
-    -- Used for timing delays. 4000 ticks per ms at 4MHz.
-    signal counter : unsigned(31 downto 0) := (others => '0');
-
-    -- State Machine States
-    type spi_state is (
-        POWER_UP_DELAY,     -- Wait for sensor power-up
-        BEGIN_WRITE_POWER_CTL, -- Start writing to POWER_CTL
-        SEND_POWER_CTL_CMD, -- Send command byte for POWER_CTL
-        SEND_POWER_CTL_DATA, -- Send data byte for POWER_CTL
-        END_WRITE_POWER_CTL,   -- End write transaction
-        WAIT_FOR_DATA_READY, -- Wait for data to be ready (based on ODR)
-        BEGIN_READ_DATA,    -- Start reading data registers
-        SEND_READ_DATA_CMD, -- Send command byte for DATAX0 (multi-byte read)
-        RECEIVE_DATA_BYTES, -- Receive all 6 data bytes
-        END_READ_DATA       -- End read transaction
-    );
-    signal state_reg : spi_state := POWER_UP_DELAY; -- Initial state
-
-    -- Signals for SPI communication
-    signal spi_tx_byte : std_logic_vector(7 downto 0) := (others => '0');
-    signal spi_rx_byte : std_logic_vector(7 downto 0) := (others => '0');
-    signal spi_bit_counter : unsigned(2 downto 0) := (others => '0'); -- 0 to 7 for 8 bits
-    signal spi_byte_counter : unsigned(2 downto 0) := (others => '0'); -- 0 to 5 for 6 data bytes + command/address byte
-
-    signal mosi_reg : std_logic := '0';
-    signal cs_reg : std_logic := '1'; -- Chip Select starts high (inactive)
-
-    -- Signal to indicate SPI busy status
-    signal spi_busy_reg : std_logic := '0';
+  -- Accumulators for X, Y, Z
+  signal x_data, y_data, z_data : std_logic_vector(15 downto 0) := (others => '0');
 
 begin
 
-    -- Assign outputs
-    sclk <= '0' when sclk_control = '0' else sclk_reg_int;
-    mosi <= mosi_reg;
-    cs   <= cs_reg;
-    -- Concatenate X, Y, Z data for output
-    acl_data <= X_data & Y_data & Z_data;
-    spi_busy <= spi_busy_reg; -- Assign the internal busy signal to the output
+  -- outputs
+  sclk     <= sclk_reg;
+  spi_busy <= not cs;           -- busy whenever CS=0
 
-    -- Corrected 1MHz SCLK generation from 4MHz iclk (divide by 4)
-    process (iclk)
-    begin
-        if rising_edge(iclk) then
-            sclk_div_counter <= sclk_div_counter + 1;
-            -- Corrected toggle points for 1MHz from 4MHz
-            if sclk_div_counter = to_unsigned(1, 2) or sclk_div_counter = to_unsigned(3, 2) then -- Toggle at count 1 and 3 (0,1,2,3 sequence)
-                 sclk_reg_int <= not sclk_reg_int;
-            end if;
-        end if;
-    end process;
+  -- Corrected 1MHz SCLK generation process
+  process(iclk)
+  begin
+    if rising_edge(iclk) then
+      sclk_prev <= sclk_reg; -- Capture previous SCLK value for edge detection
 
-    -- SPI Communication Process (Handles SCLK, MOSI, MISO shifting)
-    -- Implements SPI Mode 1 (CPOL=1, CPHA=1)
-    -- SPI shift register process (handles both edges of sclk_reg_int)
--- Sample MISO on the rising edge of SCLK
-process (sclk_reg_int, reset)
-begin
-  if reset = '1' then
-    spi_bit_counter <= (others => '0');
-    spi_rx_byte     <= (others => '0');
-  elsif rising_edge(sclk_reg_int) then
-    -- shift in one bit on every rising edge
-    spi_rx_byte(7 - to_integer(spi_bit_counter)) <= miso;
-    if spi_bit_counter = to_unsigned(7,3) then
-      spi_bit_counter <= (others => '0');
-    else
-      spi_bit_counter <= spi_bit_counter + 1;
-    end if;
-  end if;
-end process;
-
--- Drive MOSI on the falling edge of SCLK
-process (sclk_reg_int, reset)
-begin
-  if reset = '1' then
-    mosi_reg <= '0';
-  elsif falling_edge(sclk_reg_int) then
-    -- output the corresponding bit just after the falling edge
-    mosi_reg <= spi_tx_byte(7 - to_integer(spi_bit_counter));
-  end if;
-end process;
-
-    -- State Machine Process
-    process (iclk, reset)
-    begin
-        if reset = '1' then
-            state_reg <= POWER_UP_DELAY;
-            counter <= (others => '0');
-            cs_reg <= '1';
-            sclk_control <= '0';
-            spi_byte_counter <= (others => '0');
-            X_data <= (others => '0');
-            Y_data <= (others => '0');
-            Z_data <= (others => '0');
-            spi_busy_reg <= '0'; -- Reset busy signal
-        elsif rising_edge(iclk) then
-            counter <= counter + 1; -- Increment state machine sync counter
-
-            case state_reg is
-                when POWER_UP_DELAY =>
-                    spi_busy_reg <= '0'; -- Not busy during initial delay
-                    -- Wait for power-up time (approx. 11.1ms at 100Hz ODR = 11.1 * 4000 = 44400 ticks)
-                    -- Adjust this value based on your chosen ODR and ADXL345 datasheet.
-                    if counter = to_unsigned(44400 - 1, 32) then
-                        counter <= (others => '0'); -- Reset counter for next stage
-                        state_reg <= BEGIN_WRITE_POWER_CTL;
-                    end if;
-
-                when BEGIN_WRITE_POWER_CTL =>
-                    spi_busy_reg <= '1'; -- SPI is busy
-                    cs_reg <= '0'; -- Activate Chip Select
-                    sclk_control <= '1'; -- Enable SCLK generation
-                    -- Prepare command byte for writing to POWER_CTL (R/W=0, MB=0, Address=0x2D)
-                    spi_tx_byte <= ADXL345_WRITE & ADXL345_SINGLE_BYTE & POWER_CTL_ADDR;
-                    spi_byte_counter <= to_unsigned(0, 3); -- Start with command byte (Corrected type)
-                    state_reg <= SEND_POWER_CTL_CMD;
-
-                when SEND_POWER_CTL_CMD =>
-                     spi_busy_reg <= '1'; -- SPI is busy
-                     -- Wait for 8 SCLK cycles to send command byte
-                     if spi_bit_counter = to_unsigned(7, 3) and rising_edge(sclk_reg_int) then -- After 8 bits are shifted out (Corrected comparison)
-                         spi_tx_byte <= POWER_CTL_MEASURE_EN; -- Prepare data byte
-                         state_reg <= SEND_POWER_CTL_DATA;
-                         spi_bit_counter <= to_unsigned(0, 3); -- Reset bit counter for next byte (Corrected type)
-                     end if;
-
-                when SEND_POWER_CTL_DATA =>
-                    spi_busy_reg <= '1'; -- SPI is busy
-                    -- Wait for 8 SCLK cycles to send data byte
-                    if spi_bit_counter = to_unsigned(7, 3) and rising_edge(sclk_reg_int) then -- After 8 bits are shifted out (Corrected comparison)
-                        state_reg <= END_WRITE_POWER_CTL;
-                    end if;
-
-                when END_WRITE_POWER_CTL =>
-                    spi_busy_reg <= '0'; -- SPI is no longer busy
-                    cs_reg <= '1'; -- Deactivate Chip Select
-                    sclk_control <= '0'; -- Disable SCLK
-                    -- Wait for tCS,DIS (min 150ns, let's wait a few 4MHz cycles, e.g., 10 cycles = 2.5us)
-                    if counter = to_unsigned(10 - 1, 32) then -- Corrected comparison
-                        counter <= (others => '0'); -- Reset counter
-                        state_reg <= WAIT_FOR_DATA_READY;
-                    end if;
-
-                when WAIT_FOR_DATA_READY =>
-                    spi_busy_reg <= '0'; -- Not busy during wait
-                    -- Wait for data to be ready (approx. 10ms at 100Hz ODR = 10 * 4000 = 40000 ticks)
-                    -- A better approach is to use the DATA_READY interrupt.
-                    if counter = to_unsigned(40000 - 1, 32) then -- Corrected comparison
-                         counter <= (others => '0'); -- Reset counter
-                         state_reg <= BEGIN_READ_DATA;
-                    end if;
-
-                when BEGIN_READ_DATA =>
-                    spi_busy_reg <= '1'; -- SPI is busy
-                    cs_reg <= '0'; -- Activate Chip Select
-                    sclk_control <= '1'; -- Enable SCLK generation
-                    -- Prepare command byte for reading DATAX0 (R/W=1, MB=1, Address=0x32)
-                    spi_tx_byte <= ADXL345_READ & ADXL345_MULTI_BYTE & DATAX0_ADDR;
-                    spi_byte_counter <= to_unsigned(0, 3); -- Start with command/address byte (Corrected type)
-                    state_reg <= SEND_READ_DATA_CMD;
-
-                when SEND_READ_DATA_CMD =>
-                    spi_busy_reg <= '1'; -- SPI is busy
-                    -- Wait for 8 SCLK cycles to send command/address byte
-                    if spi_bit_counter = to_unsigned(7, 3) and rising_edge(sclk_reg_int) then -- After 8 bits are shifted out (Corrected comparison)
-                        -- Prepare for receiving data bytes (MOSI can be don't care, send 0s)
-                        spi_tx_byte <= (others => '0');
-                        spi_byte_counter <= to_unsigned(1, 3); -- Move to first data byte (X LSB) (Corrected type)
-                        state_reg <= RECEIVE_DATA_BYTES;
-                        spi_bit_counter <= to_unsigned(0, 3); -- Reset bit counter for next byte (Corrected type)
-                    end if;
-
-                when RECEIVE_DATA_BYTES =>
-                    spi_busy_reg <= '1'; -- SPI is busy
-                    -- Receive 6 data bytes (X LSB, X MSB, Y LSB, Y MSB, Z LSB, Z MSB)
-                    -- Corrected comparisons in 'when' clauses using to_unsigned
-                    case spi_byte_counter is
-                        when to_unsigned(1, 3) => X_data(7 downto 0) <= spi_rx_byte; -- X LSB
-                        when to_unsigned(2, 3) => X_data(15 downto 8) <= spi_rx_byte; -- X MSB
-                        when to_unsigned(3, 3) => Y_data(7 downto 0) <= spi_rx_byte; -- Y LSB
-                        when to_unsigned(4, 3) => Y_data(15 downto 8) <= spi_rx_byte; -- Y MSB
-                        when to_unsigned(5, 3) => Z_data(7 downto 0) <= spi_rx_byte; -- Z LSB
-                        when to_unsigned(6, 3) => Z_data(15 downto 8) <= spi_rx_byte; -- Z MSB
-                        when others => null; -- Should not happen
-                    end case;
+      if cs = '0' then -- Only generate SCLK when CS is low
+        sclk_div_counter <= sclk_div_counter + 1;
+        -- Toggle SCLK at count 1 and 3 of the 2-bit counter (0, 1, 2, 3 sequence)
+        if sclk_div_counter = to_unsigned(1, 2) or sclk_div_counter = to_unsigned(3, 2) then
+          sclk_reg <= not sclk_reg;
+        end if;
+      else -- SCLK idles high when CS is high (CPOL=1)
+        sclk_reg <= '1';
+        sclk_div_counter <= (others => '0'); -- Reset counter when idle
+      end if;
+    end if;
+  end process;
 
 
-                    if spi_bit_counter = to_unsigned(7, 3) and rising_edge(sclk_reg_int) then -- After 8 bits are shifted out (Corrected comparison)
-                        if spi_byte_counter = to_unsigned(6, 3) then -- After receiving the last data byte (Corrected comparison)
-                            state_reg <= END_READ_DATA;
-                        else
-                            spi_byte_counter <= spi_byte_counter + 1; -- Move to next data byte
-                            spi_bit_counter <= to_unsigned(0, 3); -- Reset bit counter for next byte (Corrected type)
-                        end if;
-                    end if;
+  --------------------------------------------------------------------------
+  -- Main synchronous process: runs the SPI state machine and handles
+  -- TX/RX shifting based on SCLK edges.
+  --------------------------------------------------------------------------
+  process(iclk)
+    -- Variables for edge detection (evaluated each iclk cycle)
+    variable falling_edge_sclk : boolean;
+    variable rising_edge_sclk  : boolean;
+  begin
+    if rising_edge(iclk) then
+      -- Detect SCLK edges based on current and previous SCLK values
+      falling_edge_sclk := (sclk_prev = '1' and sclk_reg = '0');
+      rising_edge_sclk  := (sclk_prev = '0' and sclk_reg = '1');
 
-                when END_READ_DATA =>
-                    spi_busy_reg <= '0'; -- SPI is no longer busy
-                    cs_reg <= '1'; -- Deactivate Chip Select
-                    sclk_control <= '0'; -- Disable SCLK
-                    -- Wait for tCS,DIS (min 150ns, let's wait a few 4MHz cycles, e.g., 10 cycles = 2.5us)
-                     if counter = to_unsigned(10 - 1, 32) then -- Corrected comparison
-                        counter <= (others => '0'); -- Reset counter
-                        state_reg <= WAIT_FOR_DATA_READY; -- Loop back to wait for next data
-                    end if;
+      if reset = '1' then
+        -- reset everything
+        state       <= POWERUP_DELAY;
+        delay_cnt   <= (others => '0');
+        cs          <= '1';
+        mosi        <= '0';
+        bit_cnt     <= (others => '0');
+        byte_cnt    <= (others => '0');
+        tx_shift    <= (others => '0');
+        rx_shift    <= (others => '0');
+        x_data      <= (others => '0');
+        y_data      <= (others => '0');
+        z_data      <= (others => '0');
+        acl_data    <= (others => '0');
+      else
+        -- 1) SPI TX/RX Shifting (sensitive to SCLK edges)
+        if falling_edge_sclk then -- Change MOSI on falling edge (CPHA=1)
+          mosi <= tx_shift(to_integer(bit_cnt)); -- Send MSB first
+          -- Shift TX data (prepare next bit)
+          tx_shift <= tx_shift(6 downto 0) & '0';
+        end if;
 
-                when others =>
-                    state_reg <= POWER_UP_DELAY; -- Default to initial state
+        if rising_edge_sclk then -- Sample MISO on rising edge (CPHA=1)
+          rx_shift(to_integer(bit_cnt)) <= miso; -- Capture incoming data
+          -- Shift RX data (prepare next bit)
+          rx_shift <= rx_shift(6 downto 0) & '0'; -- This shift is not strictly needed if assigning byte by byte
 
-            end case;
-        end if;
-    end process;
+          -- Increment bit counter after sampling
+          if bit_cnt = to_unsigned(7, 3) then
+            bit_cnt <= (others => '0');
+          else
+            bit_cnt <= bit_cnt + 1;
+          end if;
+        end if;
 
-end architecture behavioral;
+
+        -- 2) SPI state machine (sensitive to iclk)
+        case state is
+
+          ------------------------------------------------------------
+          when POWERUP_DELAY =>
+            cs   <= '1';
+            mosi <= '0';
+            if delay_cnt < POWERUP_DELAY_CYCLES - 1 then
+              delay_cnt <= delay_cnt + 1;
+            else
+              delay_cnt <= (others => '0');
+              state     <= WRITE_POWER_CTL_CMD;
+            end if;
+
+          ------------------------------------------------------------
+          when WRITE_POWER_CTL_CMD =>
+            cs <= '0';
+            -- Load command 0x2D on the first iclk cycle of this state
+            if delay_cnt = to_unsigned(0, 32) then
+              tx_shift  <= x"2D";
+              bit_cnt   <= to_unsigned(7, 3); -- Start from MSB
+              delay_cnt <= delay_cnt + 1; -- Mark started
+            end if;
+
+            -- Transition after sending 8 bits
+            if bit_cnt = to_unsigned(0, 3) and rising_edge_sclk then -- After the 8th rising edge
+              state <= WRITE_POWER_CTL_DATA;
+              delay_cnt <= (others => '0');
+            end if;
+
+
+          ------------------------------------------------------------
+          when WRITE_POWER_CTL_DATA =>
+            cs <= '0';
+            -- Load the data byte 0x08 on the first iclk cycle of this state
+            if delay_cnt = to_unsigned(0, 32) then
+              tx_shift  <= x"08";
+              bit_cnt   <= to_unsigned(7, 3); -- Start from MSB
+              delay_cnt <= delay_cnt + 1; -- Mark started
+            end if;
+
+            -- Transition after sending 8 bits
+            if bit_cnt = to_unsigned(0, 3) and rising_edge_sclk then -- After the 8th rising edge
+              state <= WAIT_WRITE_COMPLETE;
+            end if;
+
+          ------------------------------------------------------------
+          when WAIT_WRITE_COMPLETE =>
+            -- wait for the final rising edge to ensure last bit is sampled
+            if rising_edge_sclk then
+              cs    <= '1'; -- Deassert CS
+              state <= POST_WRITE_DELAY;
+              delay_cnt <= (others => '0');
+            end if;
+
+          ------------------------------------------------------------
+          when POST_WRITE_DELAY =>
+            cs   <= '1';
+            mosi <= '0';
+            if delay_cnt < DATA_READY_DELAY_CYCLES - 1 then
+              delay_cnt <= delay_cnt + 1;
+            else
+              delay_cnt <= (others => '0');
+              state     <= READ_DATA_CMD;
+            end if;
+
+          ------------------------------------------------------------
+          when READ_DATA_CMD =>
+            cs <= '0';
+            if delay_cnt = to_unsigned(0, 32) then
+              tx_shift  <= x"F2";  -- 1111_0010: R/W=1, MB=1, Addr=0x32
+              bit_cnt   <= to_unsigned(7, 3); -- Start from MSB
+              delay_cnt <= delay_cnt + 1;
+            end if;
+
+            -- Transition after sending 8 bits
+            if bit_cnt = to_unsigned(0, 3) and rising_edge_sclk then -- After the 8th rising edge
+              state    <= READ_DATA_BYTES;
+              byte_cnt <= to_unsigned(0, 3); -- Start with byte 0
+              bit_cnt  <= to_unsigned(7, 3); -- Start from MSB for receiving
+            end if;
+
+          ------------------------------------------------------------
+          when READ_DATA_BYTES =>
+            cs <= '0';
+            -- drive MOSI low during data-in (ADXL345 doesn't read MOSI during read data)
+            if falling_edge_sclk then
+              mosi <= '0';
+            end if;
+
+            -- Sample MISO and process received bytes on rising edge
+            if rising_edge_sclk then
+              rx_shift(to_integer(bit_cnt)) <= miso; -- Capture incoming data
+
+              -- Check if a full byte has been received
+              if bit_cnt = to_unsigned(0, 3) then -- After the 8th bit is sampled
+                -- Latch received byte into the appropriate accumulator
+                case byte_cnt is
+                  when to_unsigned(0, 3) => x_data(7 downto 0) <= rx_shift; -- X LSB
+                  when to_unsigned(1, 3) => x_data(15 downto 8) <= rx_shift; -- X MSB
+                  when to_unsigned(2, 3) => y_data(7 downto 0) <= rx_shift; -- Y LSB
+                  when to_unsigned(3, 3) => y_data(15 downto 8) <= rx_shift; -- Y MSB
+                  when to_unsigned(4, 3) => z_data(7 downto 0) <= rx_shift; -- Z LSB
+                  when to_unsigned(5, 3) => z_data(15 downto 8) <= rx_shift; -- Z MSB
+                  when others => null; -- Should not happen
+                end case;
+
+                -- Increment byte counter and reset bit counter for the next byte
+                if byte_cnt = to_unsigned(5, 3) then -- After receiving the last byte (6th byte, index 5)
+                  state <= WAIT_READ_COMPLETE;
+                else
+                  byte_cnt <= byte_cnt + 1;
+                  bit_cnt  <= to_unsigned(7, 3); -- Reset bit counter to start from MSB for next byte
+                end if;
+              end if;
+            end if;
+
+
+          ------------------------------------------------------------
+          when WAIT_READ_COMPLETE =>
+            -- wait for the final rising edge to ensure last bit is sampled
+            if rising_edge_sclk then
+              cs    <= '1'; -- Deassert CS
+              -- pack and present new data (update acl_data after transaction ends)
+              acl_data <= x_data & y_data & z_data;
+              state <= POST_READ_DELAY;
+              delay_cnt <= (others => '0');
+            end if;
+
+          ------------------------------------------------------------
+          when POST_READ_DELAY =>
+            cs   <= '1';
+            mosi <= '0';
+            if delay_cnt < DATA_READY_DELAY_CYCLES - 1 then
+              delay_cnt <= delay_cnt + 1;
+            else
+              delay_cnt <= (others => '0');
+              state <= READ_DATA_CMD;  -- loop back
+            end if;
+
+        end case;
+      end if; -- End of reset check
+    end if; -- End of rising_edge(iclk)
+  end process;
+
+end rtl;
