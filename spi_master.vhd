@@ -1,5 +1,3 @@
-
-
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all; -- Required for unsigned types and arithmetic
@@ -117,6 +115,7 @@ begin
         elsif falling_edge(sclk_reg_int) then -- Change MOSI on falling edge (CPHA=1)
              mosi_reg <= spi_tx_byte(7 - to_integer(spi_bit_counter));
         end if;
+        -- Removed the problematic 'else' clause here.
     end process;
 
     -- State Machine Process
