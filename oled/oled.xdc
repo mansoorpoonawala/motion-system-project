@@ -28,10 +28,10 @@ set_property -dict { PACKAGE_PIN K18  IOSTANDARD LVCMOS33 } [get_ports { sys_res
 
 
 ##LEDs
-#set_property -dict { PACKAGE_PIN M14  IOSTANDARD LVCMOS33 } [get_ports { leds[0] }]; #IO_L23P_T3_35 Sch=led[0]
-#set_property -dict { PACKAGE_PIN M15  IOSTANDARD LVCMOS33 } [get_ports { leds[1] }]; #IO_L23N_T3_35 Sch=led[1]
-#set_property -dict { PACKAGE_PIN G14  IOSTANDARD LVCMOS33 } [get_ports { leds[2] }]; #IO_0_35 Sch=led[2]
-#set_property -dict { PACKAGE_PIN D18  IOSTANDARD LVCMOS33 } [get_ports { leds[3] }]; #IO_L3N_T0_DQS_AD1N_35 Sch=led[3]
+set_property -dict { PACKAGE_PIN M14  IOSTANDARD LVCMOS33 } [get_ports { leds[0] }]; #IO_L23P_T3_35 Sch=led[0]
+set_property -dict { PACKAGE_PIN M15  IOSTANDARD LVCMOS33 } [get_ports { leds[1] }]; #IO_L23N_T3_35 Sch=led[1]
+set_property -dict { PACKAGE_PIN G14  IOSTANDARD LVCMOS33 } [get_ports { leds[2] }]; #IO_0_35 Sch=led[2]
+set_property -dict { PACKAGE_PIN D18  IOSTANDARD LVCMOS33 } [get_ports { leds[3] }]; #IO_L3N_T0_DQS_AD1N_35 Sch=led[3]
 
 
 ##Pmod Header JC (for ADXL345 SPI)
@@ -58,6 +58,15 @@ set_property -dict { PACKAGE_PIN T15   IOSTANDARD LVCMOS33     } [get_ports { ol
 set_property -dict { PACKAGE_PIN P14   IOSTANDARD LVCMOS33     } [get_ports { oled_dc }]; #IO_L6P_T0_34 Sch=jd_p[2]                  
 set_property -dict { PACKAGE_PIN R14   IOSTANDARD LVCMOS33     } [get_ports { oled_sclk }]; #IO_L6N_T0_VREF_34 Sch=jd_n[2]             
 set_property -dict { PACKAGE_PIN U14   IOSTANDARD LVCMOS33     } [get_ports { oled_mosi }]; #IO_L11P_T1_SRCC_34 Sch=jd_p[3]            
+set_property -dict { PACKAGE_PIN U15   IOSTANDARD LVCMOS33     } [get_ports { oled_vbat }]; #IO_L11N_T1_SRCC_34 Sch=jd_n[3]            
+set_property -dict { PACKAGE_PIN V17   IOSTANDARD LVCMOS33     } [get_ports { oled_vdd }]; #IO_L21P_T3_DQS_34 Sch=jd_p[4]             
+#set_property -dict { PACKAGE_PIN V18   IOSTANDARD LVCMOS33     } [get_ports { jd[7] }]; #IO_L21N_T3_DQS_34 Sch=jd_n[4]   
+
+#set_property -dict { PACKAGE_PIN T14   IOSTANDARD LVCMOS33     } [get_ports { oled_res }]; #IO_L5P_T0_34 Sch=jd_p[1]                  
+#set_property -dict { PACKAGE_PIN T15   IOSTANDARD LVCMOS33     } [get_ports { oled_cs }]; #IO_L5N_T0_34 Sch=jd_n[1]				 
+#set_property -dict { PACKAGE_PIN P14   IOSTANDARD LVCMOS33     } [get_ports { oled_dc }]; #IO_L6P_T0_34 Sch=jd_p[2]                  
+#set_property -dict { PACKAGE_PIN R14   IOSTANDARD LVCMOS33     } [get_ports { oled_sclk }]; #IO_L6N_T0_VREF_34 Sch=jd_n[2]             
+#set_property -dict { PACKAGE_PIN U14   IOSTANDARD LVCMOS33     } [get_ports { oled_mosi }]; #IO_L11P_T1_SRCC_34 Sch=jd_p[3]            
 #set_property -dict { PACKAGE_PIN U15   IOSTANDARD LVCMOS33     } [get_ports { vbat }]; #IO_L11N_T1_SRCC_34 Sch=jd_n[3]            
 #set_property -dict { PACKAGE_PIN V17   IOSTANDARD LVCMOS33     } [get_ports { vdd }]; #IO_L21P_T3_DQS_34 Sch=jd_p[4]             
 #set_property -dict { PACKAGE_PIN V18   IOSTANDARD LVCMOS33     } [get_ports { jd[7] }]; #IO_L21N_T3_DQS_34 Sch=jd_n[4]   
