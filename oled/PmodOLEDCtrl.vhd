@@ -127,4 +127,10 @@ begin
   oled_sclk <= init_sclk when state = OledInitialize else example_sclk;
   oled_dc   <= init_dc   when state = OledInitialize else example_dc;
 
+  -- **LED mapping**: one‐hot reflect each FSM state
+  leds(0) <= '1' when state = Idle           else '0';
+  leds(1) <= '1' when state = OledInitialize else '0';
+  leds(2) <= '1' when state = OledExample    else '0';
+  leds(3) <= '1' when state = Done           else '0';
+
 end architecture;
